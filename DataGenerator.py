@@ -32,19 +32,20 @@ class DatatGenerator:
 
     def connect(self):
         print(f"Connecting to CARLA at {self.host_ip}:2000")
-        client = carla.Client(self.host_ip, 2000)
-        client.set_timeout(10)
+        self.client = carla.Client(self.host_ip, 2000)
+        self.client.set_timeout(10)
 
-        self.world = client.get_world()
+        self.world = self.client.get_world()
         print(f"Connected to {self.world.get_map().name}")
 
-        settings = self.world.get_settings()
-        settings.synchronus_mode = True
-        settings.fixed_delta_seconds = 0.5
-        self.world.apply_settings(settings)
-
-        traffic_manager = client.get_trafficmanager()
-        traffic_manager.set_synchronous_mode(True)
+    def setup_world(self):
+        self.settings = self.world.get_settings()
+        self.settings.synchronous_mode  = True
+        self.settings.fixed_delta_seconds = 0.05
+        self.world.apply_settings(self.settings)
+        
+        self.traffic_manager = self.client.get_trafficmanager()
+        self.traffic_manager.set_synchronous_mode(True)
 
         self.blueprint_library = self.world.get_blueprint_library()
         vehicle_bp = self.blueprint_library.find('vehicle.lincoln.mkz')
@@ -57,17 +58,20 @@ class DatatGenerator:
         self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_point)
         print(f"Vehicle spawned at {spawn_point.location}")
 
-        self.vehicle.set_autopilot(True, traffic_manager.get_port())
+        self.vehicle.set_autopilot(True, self.traffic_manager.get_port())
         print("Autopilot enabled")
 
-        writer_thread = threading.Thread(target=self.image_writer, daemon=True)
-        writer_thread.start()
+    def setup_writer(self):
+        self.writer_thread = threading.Thread(target=self.image_writer, daemon=True)
+        self.writer_thread.start()
 
+    def start(self):
+        self.setup_writer()
         self.setup_cameras()
 
         spectator = self.world.get_spectator()
 
-        num_ticks = int(10.0 / settings.fixed_delta_seconds)  # 10s at 0.05s/tick → 200 ticks
+        num_ticks = int(60.0 / self.settings.fixed_delta_seconds)  # 10s at 0.05s/tick → 200 ticks
 
         try:
             for i in range(num_ticks):
@@ -89,7 +93,7 @@ class DatatGenerator:
                 ))
 
                 # Optional: slow to approx real time
-                time.sleep(settings.fixed_delta_seconds)
+                time.sleep(self.settings.fixed_delta_seconds)
 
         except KeyboardInterrupt:
             print("\nStopped by user")
@@ -105,16 +109,16 @@ class DatatGenerator:
             # Stop async writer
             self.stop_event.set()
             self.image_queue.join()
-            writer_thread.join(timeout=2.0)
+            self.writer_thread.join(timeout=2.0)
 
             # Destroy vehicle
             self.vehicle.destroy()
 
             # Restore async world + TM
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            self.world.apply_settings(settings)
-            traffic_manager.set_synchronous_mode(False)
+            self.settings.synchronous_mode = False
+            self.settings.fixed_delta_seconds = None
+            self.world.apply_settings(self.settings)
+            self.traffic_manager.set_synchronous_mode(False)
 
             print("Done! Images saved under:", os.path.abspath(self.output_root))
         
@@ -144,16 +148,22 @@ class DatatGenerator:
         camera_bp.set_attribute('fov', '90')
         camera_bp.set_attribute('sensor_tick', '0.0')  # image each world.tick()
 
-        # cameras = []
+        bbox = self.vehicle.bounding_box
+        extent = bbox.extent
+        center = bbox.location
+
+        # import pdb; pdb.set_trace()
+        z_cam = (extent.z + center.z) + 0.1
 
         camera_setups = [
-        ("front", carla.Transform(carla.Location(x=2.5, z=1.5))),
-        ("back",  carla.Transform(carla.Location(x=-2.5, z=1.5),
-                                  carla.Rotation(yaw=180))),
-        ("left",  carla.Transform(carla.Location(y=-0.8, z=1.7),
-                                  carla.Rotation(yaw=-90))),
-        ("right", carla.Transform(carla.Location(y=0.8, z=1.7),
-                                  carla.Rotation(yaw=90))),
+        ("front", carla.Transform(carla.Location(x=center.x+0.1*extent.x, y = 0.0, z=z_cam),
+                                  carla.Rotation(pitch=-5.0, yaw=0))),
+        ("back",  carla.Transform(carla.Location(x=center.x-0.4*extent.x, y = 0.0, z=z_cam),
+                                  carla.Rotation(pitch=-5.0, yaw=180))),
+        ("left",  carla.Transform(carla.Location(x=0, y=center.y-0.9*extent.y, z=z_cam),
+                                  carla.Rotation(pitch=-5.0, yaw=-90))),
+        ("right", carla.Transform(carla.Location(x=0, y=center.y+0.9*extent.y, z=z_cam),
+                                  carla.Rotation(pitch=-5.0, yaw=90))),
         ]
 
         for name, transform in camera_setups:
@@ -184,7 +194,8 @@ class DatatGenerator:
             self.cameras.append(cam)
             print(f"Camera '{name}' spawned and recording to {self.output_root}/{name}/")
 
-
 if __name__ == '__main__':
     dg = DatatGenerator()
     dg.connect()
+    dg.setup_world()
+    dg.start()
